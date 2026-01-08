@@ -21,7 +21,8 @@ def encode(sentences):
     tokens = tokenizer(sentences, padding=True, return_tensors="pt")
     input_ids = tokens["input_ids"]
     attention_mask = tokens["attention_mask"]
-    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    with torch.no_grad():
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
     return outputs.last_hidden_state, attention_mask
     
 def mean_pool(outputs, attention_mask):
@@ -32,45 +33,43 @@ def mean_pool(outputs, attention_mask):
     averages = summed_tokens / real_tokens
     return averages
     
-def batch_inputs(sentences, batch_size=32):
+def batch_inputs(sentences, batch_size=64):
     for i in range(0, len(sentences), batch_size):
         yield sentences[i: i+batch_size]
 
-def get_model_encodings(unbatched_sentences, batch_size=32, print_on=True):
-    batched_sentences = batch_inputs(unbatched_sentences, batch_size)
+def get_model_mean_pool(unbatched_sentences, batch_size=64, print_on=True):
+    batched_sentences = batch_inputs(unbatched_sentences, batch_size) #so that we don't kill memory and get a useful indication of progress
     batched_sentences = list(batched_sentences)
     total_len = len(batched_sentences)
-    outs, attns = [],[]
+    outs, attns, pooled_means = [],[],[]
     
     for sentencesid, sentences in enumerate(batched_sentences):
         if print_on == True:
-            print(f"Calculating batch {sentencesid} of {total_len}")
+            print(f"Calculating batch {sentencesid+1} of {total_len}")
         outputs, attention_mask = encode(sentences)
-        outs.append(outputs.cpu())
-        attns.append(attention_mask.cpu())
-        
-    concatenated_outs = torch.cat(outs, dim=0)
-    concatenated_attns = torch.cat(attns, dim=0)
-        
-    return concatenated_outs, concatenated_attns
+        pooled_mean = mean_pool(outputs, attention_mask)
+        pooled_means.append(pooled_mean)
+    
+    print(torch.cat(pooled_means, dim=0).mean(dim=0))
+    pooled_means = torch.cat(pooled_means, dim=0).mean(dim=0)
+    
+    return pooled_means
 
 with open(gptfile) as infile:
-    gpts = infile.read().split("\n")
+    gpts = infile.read().split("\n")[:128]
 
 with open(jacobfile) as infile:
-    jacobs = infile.read().split("\n")
+    jacobs = infile.read().split("\n")[:128]
 
 print("Computing GPTs...")
-outputs, attention_mask = get_model_encodings(gpts)
-gptmeanpool = mean_pool(outputs, attention_mask)
+gptmeanpool = get_model_mean_pool(gpts)
 
 print("Computing Jacobs...")
-outputs, attention_mask = get_model_encodings(jacobs)
-jacobmeanpool = mean_pool(outputs, attention_mask)
+jacobmeanpool = get_model_mean_pool(jacobs)
 
     
 
-jacobdirection = (jacobmeanpool - gptmeanpool).mean(dim=0)
+jacobdirection = (jacobmeanpool - gptmeanpool) / 2
 
 print(jacobdirection)
 
