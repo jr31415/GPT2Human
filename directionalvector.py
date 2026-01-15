@@ -1,7 +1,7 @@
 import sys
 runtype = sys.argv[1]
 arg2 = sys.argv[2] #either str (a sentence) or str (path to jacob sentences)
-if len(sys.argv) == 3:
+if len(sys.argv) == 4:
     arg3 = sys.argv[3] #str (path to gpt sentences)
 
 from transformers import pipeline, BartTokenizer, BartForConditionalGeneration
@@ -9,6 +9,8 @@ from transformers.modeling_outputs import BaseModelOutput
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader, Dataset
+import torch.nn as nn
+import torch.optim as optim
 import numpy as np
 
 
@@ -21,19 +23,21 @@ pipeline = pipeline(
     device=0
 )
 
+device = torch.device("mps")
+
 class decode(nn.Module):
     def __init__(self):
         super().__init__()
         
         self.net = nn.Sequential(
-        nn.Linear(768, 512),
+        nn.Linear(1024, 512),
         nn.ReLU(),
-        nn.Linear(512, 768 * 32) #len of 32
+        nn.Linear(512, 1024)
         )
     
     def forward(self, x):
         out = self.net(x)
-        out = out.view(x.size(0), 32, 768)
+        out = out.view(x.size(0), 1024)
     
         return out
 
@@ -106,31 +110,44 @@ if runtype == "-c":
     exit()
 
 if runtype == "-t":
+    decoder = decode()
+    decoder.to(device)
     with open(arg2) as infile:
         jacobs = infile.read().split("\n")
         
-    def train(loader, samples):
-        loss_fn = torch.nn.CrossEntropyLoss()
-        optimizer = torch.optim.SGD(decode.parameters, lr=0.001)
-        #TODO: Finish this
+    def train(loader, epochs=64):
+        optimizer = torch.optim.SGD(decoder.parameters(), lr=0.001)
         
-    outputs, attention_mask = encode(jacobs)
-    mask = attention_mask.unsqueeze(dim=-1)
-    targets_nopad = outputs * mask
-    targets = targets_nopad[:, :32, :]
+        for epoch in range(epochs):
+            print(f"Training Epoch #{epoch + 1}")
+            mse_loss = nn.MSELoss()
+            for samples, target in loader:
+                samples, target = samples.to(device), target.to(device)
+                optimizer.zero_grad()
+                model_output = decoder(samples)
+                loss = mse_loss(model_output, target)
+                print(f"Loss: {loss}")
+                loss.backward()
+                optimizer.step()
+        
     
-    jacobs_meaned = mean_pool(outputs, attention_mask)
+    jacoboutputs, jacobmasks = encode(jacobs)
+    unsqueezedmasks = torch.unsqueeze(jacobmasks, dim=-1)
+    targets = jacobouputs * unsqueezedmasks
     
-    samples = list(zip(jacobs_meaned, targets))
+    samples = []
+    for sentence, mask in zip(torch.split(jacoboutputs, dim=0), torch.split(jacobmasks, dim=0)):
+        samples.append(mean_pool(sentence, mask))
+    data = zip(samples, targets)
+    dataset = DataSet(data)
     
-    dataset = DataSet(samples)
     loader = DataLoader(dataset, batch_size=128, shuffle=True)
     
-    
+    train(loader, epochs=64)
+    torch.save(decoder, 'decode.pt')
     
     
 if runtype == "-s":
-    
-   
     dataset = DataSet(samples)
     loader = DataLoader(dataset, batch_size=128, shuffle=True)
+    #TODO: FINISH THIS
