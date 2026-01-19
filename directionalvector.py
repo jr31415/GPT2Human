@@ -28,18 +28,17 @@ device = torch.device("mps")
 class decode(nn.Module):
     def __init__(self):
         super().__init__()
+        self.ll1 = nn.Linear(1024, 512) #linear layer 1
+        self.embed = nn.Embedding(25, 512) #embedding layer
+        self.dl = nn.TransformerDecoderLayer(nhead=16, dim_feedforward=2048, d_model=512) #decoder layer
+        self.tl = nn.TransformerDecoder(self.dl, num_layers=4)
+        self.ol = nn.Linear(512, 50265) #output layer
         
-        self.net = nn.Sequential(
-        nn.Linear(1024, 512),
-        nn.ReLU(),
-        nn.Linear(512, 1024)
-        )
-    
-    def forward(self, x):
-        out = self.net(x)
-        out = out.view(x.size(0), 1024)
-    
-        return out
+    def forward(self, embedding, seq):
+        proj = self.input_proj(embedding)
+        positions = torch.arange(seq.size())
+        position_embeddings = self.pos_embed(positions)
+        #TODO: Finish this
 
 class DataSet(Dataset):
     def __init__(self, samples):
@@ -76,7 +75,7 @@ def get_model_mean_pool(unbatched_sentences, batch_size=64, print_on=True):
     batched_sentences = batch_inputs(unbatched_sentences, batch_size) #so that we don't kill memory and get a useful indication of progress
     batched_sentences = list(batched_sentences)
     total_len = len(batched_sentences)
-    outs, attns, pooled_means = [],[],[]
+    pooled_means = []
     
     for sentencesid, sentences in enumerate(batched_sentences):
         if print_on == True:
@@ -117,15 +116,14 @@ if runtype == "-t":
         
     def train(loader, epochs=64):
         optimizer = torch.optim.SGD(decoder.parameters(), lr=0.001)
-        
+        lossfn = nn.CrossEntropyLoss()
         for epoch in range(epochs):
             print(f"Training Epoch #{epoch + 1}")
-            mse_loss = nn.MSELoss()
             for samples, target in loader:
                 samples, target = samples.to(device), target.to(device)
                 optimizer.zero_grad()
                 model_output = decoder(samples)
-                loss = mse_loss(model_output, target)
+                loss = lossfn(model_output, target)
                 print(f"Loss: {loss}")
                 loss.backward()
                 optimizer.step()
@@ -133,7 +131,7 @@ if runtype == "-t":
     
     jacoboutputs, jacobmasks = encode(jacobs)
     unsqueezedmasks = torch.unsqueeze(jacobmasks, dim=-1)
-    targets = jacobouputs * unsqueezedmasks
+    targets = tokenizer(jacobs, padding=True, return_tensors="pt")
     
     samples = []
     for sentence, mask in zip(torch.split(jacoboutputs, dim=0), torch.split(jacobmasks, dim=0)):
