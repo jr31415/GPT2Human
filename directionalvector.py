@@ -29,16 +29,27 @@ class decode(nn.Module):
     def __init__(self):
         super().__init__()
         self.ll1 = nn.Linear(1024, 512) #linear layer 1
-        self.embed = nn.Embedding(25, 512) #embedding layer
+        self.tembed = nn.Embedding(50265, 512) #token embedding layer
+        self.pembed = nn.Embedding(100, 512) #positional embedding layer
         self.dl = nn.TransformerDecoderLayer(nhead=16, dim_feedforward=2048, d_model=512) #decoder layer
         self.tl = nn.TransformerDecoder(self.dl, num_layers=4)
         self.ol = nn.Linear(512, 50265) #output layer
         
     def forward(self, embedding, seq):
-        proj = self.input_proj(embedding)
-        positions = torch.arange(seq.size())
-        position_embeddings = self.pos_embed(positions)
-        #TODO: Finish this
+        seq_len = seq.size(1)
+        mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1)
+        mask = mask.masked_fill(mask==1, float("-inf")).to(seq.device)
+        proj = self.ll1(embedding)
+        positions = torch.arange(seq_len, device=seq.device)
+        token_embeddings = self.tembed(seq)
+        position_embeddings = self.pembed(positions).unsqueeze(dim=0).expand(token_embeddings.size(dim=0), -1, -1)
+        decoder_input = (position_embeddings + token_embeddings).transpose(0, 1) #mark word position
+        memory = proj.unsqueeze(dim=0)
+        output = self.ol(self.tl(decoder_input, memory, tgt_mask=mask)).transpose(0, 1)
+        
+        return output
+        
+        
 
 class DataSet(Dataset):
     def __init__(self, samples):
