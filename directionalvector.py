@@ -34,8 +34,9 @@ class decode(nn.Module):
         self.dl = nn.TransformerDecoderLayer(nhead=16, dim_feedforward=2048, d_model=512) #decoder layer
         self.tl = nn.TransformerDecoder(self.dl, num_layers=4)
         self.ol = nn.Linear(512, 50265) #output layer
+        self.dropout = nn.Dropout(0.5)
         
-    def forward(self, embedding, seq):
+    def forward(self, embedding, seq, padding=None):
         seq_len = seq.size(1)
         mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1)
         mask = mask.masked_fill(mask==1, float("-inf")).to(seq.device)
@@ -45,12 +46,10 @@ class decode(nn.Module):
         position_embeddings = self.pembed(positions).unsqueeze(dim=0).expand(token_embeddings.size(dim=0), -1, -1)
         decoder_input = (position_embeddings + token_embeddings).transpose(0, 1) #mark word position
         memory = proj.unsqueeze(dim=0)
-        output = self.ol(self.tl(decoder_input, memory, tgt_mask=mask)).transpose(0, 1)
+        output = self.ol(self.dropout(self.tl(decoder_input, memory, tgt_mask=mask, tgt_key_padding_mask=padding))).transpose(0, 1)
         
         return output
         
-        
-
 class DataSet(Dataset):
     def __init__(self, samples):
         self.samples = list(samples)
@@ -60,7 +59,7 @@ class DataSet(Dataset):
         
     def __getitem__(self, itemid):
         embedding, target = self.samples[itemid]
-        return torch.tensor(embedding), torch.tensor(target)
+        return embedding, target
 
 def encode(sentences):
     tokens = tokenizer(sentences, padding=True, return_tensors="pt")
@@ -99,8 +98,33 @@ def get_model_mean_pool(unbatched_sentences, batch_size=64, print_on=True):
     pooled_means = torch.cat(pooled_means, dim=0).mean(dim=0)
     
     return pooled_means
+    
+def encode_all_sentences(unbatched_sentences, batch_size=64, print_on=True):
+    batched_sentences = batch_inputs(unbatched_sentences, batch_size) #so that we don't kill memory and get a useful indication of progress
+    batched_sentences = list(batched_sentences)
+    total_len = len(batched_sentences)
+    outputs, attention_masks = [],[]
+    max_len = 0
+    
+    for sentencesid, sentences in enumerate(batched_sentences):
+        if print_on == True:
+            print(f"Encoding batch {sentencesid+1} of {total_len}")
+        output, attention_mask = encode(sentences)
+        outputs.append(output)
+        attention_masks.append(attention_mask)
+        output_len = output.size(dim=1)
+        if max_len < output_len:
+            max_len = output_len
+        
+    """padding = torch.zeros(max_len, 1024)
+    padding.
+    padded_outputs, padded_masks = [],[]
+    for output in outputs:
+        padded_outputs.append((output + padding[output.size(0), :]).replace(0, tokenizer.pad_token_id))""" #TODO: Fix this!!
+        
+    return torch.cat(outputs, dim=0), torch.cat(attention_masks, dim=0)
 
-if runtype == "-c":
+if runtype == "-c": #create directional vector
     with open(arg2) as infile:
         jacobs = infile.read().split("\n")
 
@@ -119,35 +143,36 @@ if runtype == "-c":
     torch.save(jacobdirection, 'direction.pt')
     exit()
 
-if runtype == "-t":
+if runtype == "-t": #train decoder model
     decoder = decode()
     decoder.to(device)
     with open(arg2) as infile:
         jacobs = infile.read().split("\n")
         
     def train(loader, epochs=64):
-        optimizer = torch.optim.SGD(decoder.parameters(), lr=0.001)
+        optimizer = torch.optim.Adam(decoder.parameters(), lr=0.001)
         lossfn = nn.CrossEntropyLoss()
         for epoch in range(epochs):
             print(f"Training Epoch #{epoch + 1}")
             for samples, target in loader:
                 samples, target = samples.to(device), target.to(device)
+                padding = target == tokenizer.pad_token_id
                 optimizer.zero_grad()
-                model_output = decoder(samples)
-                loss = lossfn(model_output, target)
+                model_output = decoder(samples, target, padding=padding)
+                loss = lossfn(model_output.reshape(-1, 50265), target.reshape(-1))
                 print(f"Loss: {loss}")
                 loss.backward()
                 optimizer.step()
         
-    
-    jacoboutputs, jacobmasks = encode(jacobs)
+    jacoboutputs, jacobmasks = encode_all_sentences(jacobs[:100])
+    print("this is done king :)")
     unsqueezedmasks = torch.unsqueeze(jacobmasks, dim=-1)
-    targets = tokenizer(jacobs, padding=True, return_tensors="pt")
-    
+    targets = tokenizer(jacobs[:100], padding=True, return_tensors="pt")["input_ids"]
     samples = []
-    for sentence, mask in zip(torch.split(jacoboutputs, dim=0), torch.split(jacobmasks, dim=0)):
+    for sentence, mask in zip(torch.split(jacoboutputs, 1, dim=0), torch.split(jacobmasks, 1, dim=0)):
         samples.append(mean_pool(sentence, mask))
-    data = zip(samples, targets)
+    samples = torch.cat(samples, dim=0)
+    data = list(zip(samples, targets))
     dataset = DataSet(data)
     
     loader = DataLoader(dataset, batch_size=128, shuffle=True)
