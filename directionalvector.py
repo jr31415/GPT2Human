@@ -45,7 +45,7 @@ class decode(nn.Module):
         token_embeddings = self.tembed(seq)
         position_embeddings = self.pembed(positions).unsqueeze(dim=0).expand(token_embeddings.size(dim=0), -1, -1)
         decoder_input = (position_embeddings + token_embeddings).transpose(0, 1) #mark word position
-        memory = proj.unsqueeze(dim=0)
+        memory = proj.unsqueeze(dim=0).expand(seq_len, -1, -1)
         output = self.ol(self.dropout(self.tl(decoder_input, memory, tgt_mask=mask, tgt_key_padding_mask=padding))).transpose(0, 1)
         
         return output
@@ -116,13 +116,23 @@ def encode_all_sentences(unbatched_sentences, batch_size=64, print_on=True):
         if max_len < output_len:
             max_len = output_len
         
-    """padding = torch.zeros(max_len, 1024)
-    padding.
+    
     padded_outputs, padded_masks = [],[]
-    for output in outputs:
-        padded_outputs.append((output + padding[output.size(0), :]).replace(0, tokenizer.pad_token_id))""" #TODO: Fix this!!
+    for output, mask in zip(outputs, attention_masks):
+        batch_size, seqlen, dummy = output.shape
+        pad_len = max_len - seqlen
         
-    return torch.cat(outputs, dim=0), torch.cat(attention_masks, dim=0)
+        if pad_len > 0:
+            output_pad = torch.zeros(batch_size, pad_len, 1024)
+            mask_pad = torch.zeros(batch_size,pad_len)
+            
+            output = torch.cat([output, output_pad], dim=1)
+            mask = torch.cat([mask, mask_pad], dim=1)
+     
+        padded_outputs.append(output)
+        padded_masks.append(mask)
+
+    return torch.cat(padded_outputs, dim=0), torch.cat(padded_masks, dim=0)
 
 if runtype == "-c": #create directional vector
     with open(arg2) as infile:
@@ -151,7 +161,7 @@ if runtype == "-t": #train decoder model
         
     def train(loader, epochs=64):
         optimizer = torch.optim.Adam(decoder.parameters(), lr=0.001)
-        lossfn = nn.CrossEntropyLoss()
+        lossfn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
         for epoch in range(epochs):
             print(f"Training Epoch #{epoch + 1}")
             for samples, target in loader:
