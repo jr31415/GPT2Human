@@ -2,7 +2,7 @@ import sys
 runtype = sys.argv[1]
 arg2 = sys.argv[2] #either str (a sentence) or str (path to jacob sentences)
 if len(sys.argv) == 4:
-    arg3 = sys.argv[3] #str (path to gpt sentences)
+    arg3 = sys.argv[3] #str (path to gpt sentences) or str (path to pretrain sentences)
 
 from transformers import pipeline, BartTokenizer, BartForConditionalGeneration
 from transformers.modeling_outputs import BaseModelOutput
@@ -158,9 +158,11 @@ if runtype == "-t": #train decoder model
     decoder.to(device)
     with open(arg2) as infile:
         jacobs = infile.read().split("\n")
+    with open(arg3) as infile:
+        pretrainings = infile.read().split("\n")
         
-    def train(loader, epochs=64):
-        optimizer = torch.optim.Adam(decoder.parameters(), lr=0.001)
+    def train(loader, epochs=64, lr=0.0001):
+        optimizer = torch.optim.Adam(decoder.parameters(), lr=lr)
         lossfn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
         for epoch in range(epochs):
             print(f"Training Epoch #{epoch + 1}")
@@ -173,11 +175,27 @@ if runtype == "-t": #train decoder model
                 print(f"Loss: {loss}")
                 loss.backward()
                 optimizer.step()
-        
-    jacoboutputs, jacobmasks = encode_all_sentences(jacobs[:100])
+   
+   
+   
+    ptoutputs, ptmasks = encode_all_sentences(pretrainings) #pretraining loop
+    print("this is done king :)")
+    unsqueezedmasks = torch.unsqueeze(ptmasks, dim=-1)
+    targets = tokenizer(pretrainings, padding=True, return_tensors="pt")["input_ids"]
+    samples = []
+    for sentence, mask in zip(torch.split(ptoutputs, 1, dim=0), torch.split(ptmasks, 1, dim=0)):
+        samples.append(mean_pool(sentence, mask))
+    samples = torch.cat(samples, dim=0)
+    data = list(zip(samples, targets))
+    dataset = DataSet(data)
+    
+    loader = DataLoader(dataset, batch_size=128, shuffle=True)
+    train(loader, epochs=24)
+    
+    jacoboutputs, jacobmasks = encode_all_sentences(jacobs) #fine tuning loop
     print("this is done king :)")
     unsqueezedmasks = torch.unsqueeze(jacobmasks, dim=-1)
-    targets = tokenizer(jacobs[:100], padding=True, return_tensors="pt")["input_ids"]
+    targets = tokenizer(jacobs, padding=True, return_tensors="pt")["input_ids"]
     samples = []
     for sentence, mask in zip(torch.split(jacoboutputs, 1, dim=0), torch.split(jacobmasks, 1, dim=0)):
         samples.append(mean_pool(sentence, mask))
@@ -187,7 +205,7 @@ if runtype == "-t": #train decoder model
     
     loader = DataLoader(dataset, batch_size=128, shuffle=True)
     
-    train(loader, epochs=64)
+    train(loader, epochs=96, lr=0.00001)
     torch.save(decoder, 'decode.pt')
     
     

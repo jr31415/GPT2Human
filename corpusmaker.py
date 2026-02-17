@@ -7,11 +7,11 @@ with open(file) as infile:
     text = infile.read()
 
 def clean_corpus(text):
-    text = re.sub(r".+[^.?!]\n", "", text)
+    #text = re.sub(r".+[^.?!]\n", "", text)
     text = re.sub(r".+[^.?!]\u2028", "\n", text)
     text = re.sub(r".+[^.?!]\u2029", "\n", text)
-    text = text.replace("\t", "")
-    text = text.replace("\r", "")
+    text = text.replace("\t", " ")
+    text = text.replace("\r", " ")
     text = text.replace("  ", " ")
     text = text.replace("? ", "?")
     text = text.replace("! ", "!")
