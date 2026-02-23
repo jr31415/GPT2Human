@@ -30,7 +30,7 @@ class decode(nn.Module):
         super().__init__()
         self.ll1 = nn.Linear(1024, 512) #linear layer 1
         self.tembed = nn.Embedding(tokenizer.vocab_size, 512) #token embedding layer
-        self.pembed = nn.Embedding(128, 512) #positional embedding layer
+        self.pembed = nn.Embedding(256, 512) #positional embedding layer, 256 was chosen out of an abundance of caution
         self.dl = nn.TransformerDecoderLayer(nhead=16, dim_feedforward=2048, d_model=512) #decoder layer
         self.tl = nn.TransformerDecoder(self.dl, num_layers=4)
         self.ol = nn.Linear(512, tokenizer.vocab_size) #output layer
@@ -99,7 +99,7 @@ def get_model_mean_pool(unbatched_sentences, batch_size=64, print_on=True):
     
     return pooled_means
     
-def encode_all_sentences(unbatched_sentences, batch_size=64, print_on=True):
+def encode_all_sentences(unbatched_sentences, batch_size=64, print_on=False):
     batched_sentences = batch_inputs(unbatched_sentences, batch_size) #so that we don't kill memory and get a useful indication of progress
     batched_sentences = list(batched_sentences)
     total_len = len(batched_sentences)
@@ -161,10 +161,11 @@ if runtype == "-t": #train decoder model
     with open(arg3) as infile:
         pretrainings = infile.read().split("\n")
         
-        
-    optimizer = torch.optim.Adam(decoder.parameters(), lr=lr)
+    learning_rate=0.0001
+    optimizer = torch.optim.Adam(decoder.parameters(), lr=learning_rate)
     lossfn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
     def train(loader, epochs=64, lr=0.0001, printepoch=True, optimizer=optimizer, lossfn=lossfn):
+        learning_rate=lr
         for epoch in range(epochs):
             if printepoch==True:
                 print(f"Training Epoch #{epoch + 1}")
@@ -172,10 +173,12 @@ if runtype == "-t": #train decoder model
                 sample, target = sample.to(device), target.to(device)
                 padding = (target[:, :-1] == tokenizer.pad_token_id).bool()
                 optimizer.zero_grad()
-                print(sample.size(), target[:, :-1].size(), padding.size())
+                if padding.size(1) > 256:
+                    continue
                 model_output = decoder(sample, target[:, :-1], padding=padding)
                 loss = lossfn(model_output.reshape(-1, tokenizer.vocab_size), target[:, 1:].reshape(-1))
-                print(f"Loss: {loss}")
+                if printepoch==True:
+                    print(f"Loss: {loss}")
                 loss.backward()
                 optimizer.step()
    
@@ -186,7 +189,7 @@ if runtype == "-t": #train decoder model
     for i in range(2):
         print(f"Training Epoch #{i + 1}")
         random.shuffle(ptrange)
-        for val in ptrange:
+        for batchno, val in enumerate(ptrange):
             with torch.no_grad():
                 ptoutputs, ptmasks = encode_all_sentences(pretrainings[(val-128):val]) #pretraining loop
             targets = tokenizer(pretrainings[(val-128):val], padding=True, return_tensors="pt")["input_ids"].to(device)
@@ -197,8 +200,12 @@ if runtype == "-t": #train decoder model
             data = list(zip(samples, targets))
             dataset = DataSet(data)
     
-            loader = DataLoader(dataset, batch_size=128, shuffle=True)
-            train(loader, epochs=1, printepoch=False)
+            loader = DataLoader(dataset, batch_size=32, shuffle=True)
+            if batchno % 50 != 0:
+                train(loader, epochs=1, printepoch=False)
+            else:
+                print(f"Processing Batch #{batchno} of {len(ptrange)}, Epoch #{i + 1}")
+                train(loader, epochs=1, printepoch=True)
     
     jacoboutputs, jacobmasks = encode_all_sentences(jacobs) #fine tuning loop
     unsqueezedmasks = torch.unsqueeze(jacobmasks, dim=-1)
@@ -210,7 +217,7 @@ if runtype == "-t": #train decoder model
     data = list(zip(samples, targets))
     dataset = DataSet(data)
     
-    loader = DataLoader(dataset, batch_size=128, shuffle=True)
+    loader = DataLoader(dataset, batch_size=32, shuffle=True)
     
     train(loader, epochs=96, lr=0.00001)
     torch.save(decoder, 'decode.pt')
