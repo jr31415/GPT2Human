@@ -12,40 +12,40 @@ from torch.utils.data import DataLoader, Dataset
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import random
+import warnings
+warnings.filterwarnings("ignore")
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
+device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
 tokenizer = BartTokenizer.from_pretrained("facebook/bart-large")
 model = BartForConditionalGeneration.from_pretrained("facebook/bart-large")
-pipeline = pipeline(
-    task="fill-mask",
-    model="facebook/bart-large",
-    dtype=torch.float16,
-    device=0
-)
+model.to(device)
 
-device = torch.device("mps")
 
 class decode(nn.Module):
     def __init__(self):
         super().__init__()
         self.ll1 = nn.Linear(1024, 512) #linear layer 1
-        self.tembed = nn.Embedding(50265, 512) #token embedding layer
-        self.pembed = nn.Embedding(100, 512) #positional embedding layer
+        self.tembed = nn.Embedding(tokenizer.vocab_size, 512) #token embedding layer
+        self.pembed = nn.Embedding(128, 512) #positional embedding layer
         self.dl = nn.TransformerDecoderLayer(nhead=16, dim_feedforward=2048, d_model=512) #decoder layer
         self.tl = nn.TransformerDecoder(self.dl, num_layers=4)
-        self.ol = nn.Linear(512, 50265) #output layer
+        self.ol = nn.Linear(512, tokenizer.vocab_size) #output layer
         self.dropout = nn.Dropout(0.5)
         
     def forward(self, embedding, seq, padding=None):
         seq_len = seq.size(1)
-        mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1)
-        mask = mask.masked_fill(mask==1, float("-inf")).to(seq.device)
+        mask = torch.triu(torch.ones(seq_len, seq_len, device=seq.device), diagonal = 1)
+        mask = mask.masked_fill(mask == 1, float("-inf"))
         proj = self.ll1(embedding)
         positions = torch.arange(seq_len, device=seq.device)
         token_embeddings = self.tembed(seq)
         position_embeddings = self.pembed(positions).unsqueeze(dim=0).expand(token_embeddings.size(dim=0), -1, -1)
         decoder_input = (position_embeddings + token_embeddings).transpose(0, 1) #mark word position
-        memory = proj.unsqueeze(dim=0).expand(seq_len, -1, -1)
+        memory = proj.unsqueeze(dim=0)
         output = self.ol(self.dropout(self.tl(decoder_input, memory, tgt_mask=mask, tgt_key_padding_mask=padding))).transpose(0, 1)
         
         return output
@@ -63,8 +63,8 @@ class DataSet(Dataset):
 
 def encode(sentences):
     tokens = tokenizer(sentences, padding=True, return_tensors="pt")
-    input_ids = tokens["input_ids"]
-    attention_mask = tokens["attention_mask"]
+    input_ids = tokens["input_ids"].to(device)
+    attention_mask = tokens["attention_mask"].to(device)
     with torch.no_grad():
         outputs = model(input_ids=input_ids, attention_mask=attention_mask)
     return outputs.encoder_last_hidden_state, attention_mask
@@ -123,8 +123,8 @@ def encode_all_sentences(unbatched_sentences, batch_size=64, print_on=True):
         pad_len = max_len - seqlen
         
         if pad_len > 0:
-            output_pad = torch.zeros(batch_size, pad_len, 1024)
-            mask_pad = torch.zeros(batch_size,pad_len)
+            output_pad = torch.zeros(batch_size, pad_len, 1024, device=device)
+            mask_pad = torch.zeros(batch_size,pad_len, device=device)
             
             output = torch.cat([output, output_pad], dim=1)
             mask = torch.cat([mask, mask_pad], dim=1)
@@ -161,39 +161,46 @@ if runtype == "-t": #train decoder model
     with open(arg3) as infile:
         pretrainings = infile.read().split("\n")
         
-    def train(loader, epochs=64, lr=0.0001):
-        optimizer = torch.optim.Adam(decoder.parameters(), lr=lr)
-        lossfn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
+        
+    optimizer = torch.optim.Adam(decoder.parameters(), lr=lr)
+    lossfn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
+    def train(loader, epochs=64, lr=0.0001, printepoch=True, optimizer=optimizer, lossfn=lossfn):
         for epoch in range(epochs):
-            print(f"Training Epoch #{epoch + 1}")
-            for samples, target in loader:
-                samples, target = samples.to(device), target.to(device)
-                padding = target == tokenizer.pad_token_id
+            if printepoch==True:
+                print(f"Training Epoch #{epoch + 1}")
+            for sample, target in loader:
+                sample, target = sample.to(device), target.to(device)
+                padding = (target[:, :-1] == tokenizer.pad_token_id).bool()
                 optimizer.zero_grad()
-                model_output = decoder(samples, target, padding=padding)
-                loss = lossfn(model_output.reshape(-1, 50265), target.reshape(-1))
+                print(sample.size(), target[:, :-1].size(), padding.size())
+                model_output = decoder(sample, target[:, :-1], padding=padding)
+                loss = lossfn(model_output.reshape(-1, tokenizer.vocab_size), target[:, 1:].reshape(-1))
                 print(f"Loss: {loss}")
                 loss.backward()
                 optimizer.step()
    
    
    
-    ptoutputs, ptmasks = encode_all_sentences(pretrainings) #pretraining loop
-    print("this is done king :)")
-    unsqueezedmasks = torch.unsqueeze(ptmasks, dim=-1)
-    targets = tokenizer(pretrainings, padding=True, return_tensors="pt")["input_ids"]
-    samples = []
-    for sentence, mask in zip(torch.split(ptoutputs, 1, dim=0), torch.split(ptmasks, 1, dim=0)):
-        samples.append(mean_pool(sentence, mask))
-    samples = torch.cat(samples, dim=0)
-    data = list(zip(samples, targets))
-    dataset = DataSet(data)
+    ptrange = list(range(128, len(pretrainings), 128))
+    #for i in range(32):
+    for i in range(2):
+        print(f"Training Epoch #{i + 1}")
+        random.shuffle(ptrange)
+        for val in ptrange:
+            with torch.no_grad():
+                ptoutputs, ptmasks = encode_all_sentences(pretrainings[(val-128):val]) #pretraining loop
+            targets = tokenizer(pretrainings[(val-128):val], padding=True, return_tensors="pt")["input_ids"].to(device)
+            samples = []
+            samples = mean_pool(ptoutputs, ptmasks)
+            del ptoutputs, ptmasks
+            torch.cuda.empty_cache()
+            data = list(zip(samples, targets))
+            dataset = DataSet(data)
     
-    loader = DataLoader(dataset, batch_size=128, shuffle=True)
-    train(loader, epochs=24)
+            loader = DataLoader(dataset, batch_size=128, shuffle=True)
+            train(loader, epochs=1, printepoch=False)
     
     jacoboutputs, jacobmasks = encode_all_sentences(jacobs) #fine tuning loop
-    print("this is done king :)")
     unsqueezedmasks = torch.unsqueeze(jacobmasks, dim=-1)
     targets = tokenizer(jacobs, padding=True, return_tensors="pt")["input_ids"]
     samples = []
