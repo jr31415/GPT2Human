@@ -1,3 +1,13 @@
+"""
+This represents the mean pooled example, where
+a sentence will be encoded into a mean-pooled
+vector c⃗ representing a ChatGPT sample, a 
+directional vector u⃗ (Σj⃗ - Σc⃗)will be added
+to end up with with r⃗ (representation of
+jacob vector j⃗), which then gets decoded
+by a transfromer model trained on j⃗ samples
+"""
+
 import sys
 runtype = sys.argv[1]
 arg2 = sys.argv[2] #either str (a sentence) or str (path to jacob sentences)
@@ -110,9 +120,14 @@ def encode_all_sentences(unbatched_sentences, batch_size=64, print_on=False):
         if print_on == True:
             print(f"Encoding batch {sentencesid+1} of {total_len}")
         output, attention_mask = encode(sentences)
-        outputs.append(output)
-        attention_masks.append(attention_mask)
+        outputs.append(output.cpu())
+        attention_masks.append(attention_mask.cpu())
+        
+        if device == torch.device("cuda"):
+            torch.cuda.empty_cache()
         output_len = output.size(dim=1)
+        
+        del output, attention_mask
         if max_len < output_len:
             max_len = output_len
         
@@ -184,8 +199,7 @@ if runtype == "-t": #train decoder model
    
    
    
-    ptrange = list(range(128, len(pretrainings), 128))
-    #for i in range(32):
+    ptrange = list(range(128, len(pretrainings), 128)) #pretraining loop
     for i in range(2):
         print(f"Training Epoch #{i + 1}")
         random.shuffle(ptrange)
