@@ -224,6 +224,20 @@ if runtype == "-t": #train decoder model
     
     
 if runtype == "-s":
-    dataset = DataSet(samples)
-    loader = DataLoader(dataset, batch_size=128, shuffle=True)
-    #TODO: FINISH THIS
+    decoder = decode().to(device)
+    decoder = torch.load("decode.pt", map_location=device, weights_only=False)
+    decoder.eval()
+    string = arg2
+    output, mask = encode(string)
+    unsqueezedmask = mask.unsqueeze(dim=-1)
+    embedding = mean_pool(output, mask).to(device)
+    seq = torch.tensor([[tokenizer.bos_token_id]]).to(device)
+    for i in range(256):
+        generated = decoder(embedding, seq)[:, -1, :].argmax(dim = -1, keepdim=True)
+        if generated.item() == tokenizer.eos_token_id:
+            break
+            
+        seq = torch.cat([seq, generated], dim=-1)
+    print(tokenizer.decode(seq[0], skip_special_tokens=True))
+    
+    
