@@ -72,7 +72,7 @@ class DataSet(Dataset):
         return embedding, target
 
 def encode(sentences):
-    tokens = tokenizer(sentences, padding=True, return_tensors="pt")
+    tokens = tokens = tokenizer(sentences, padding=True, truncation=True, max_length=256, return_tensors="pt")
     input_ids = tokens["input_ids"].to(device)
     attention_mask = tokens["attention_mask"].to(device)
     with torch.no_grad():
@@ -109,45 +109,22 @@ def get_model_mean_pool(unbatched_sentences, batch_size=64, print_on=True):
     
     return pooled_means
     
-def encode_all_sentences(unbatched_sentences, batch_size=64, print_on=False):
-    batched_sentences = batch_inputs(unbatched_sentences, batch_size) #so that we don't kill memory and get a useful indication of progress
-    batched_sentences = list(batched_sentences)
+def encode_all_sentences(unbatched_sentences, batch_size=8, print_on=False):
+    batched_sentences = list(batch_inputs(unbatched_sentences, batch_size))
     total_len = len(batched_sentences)
-    outputs, attention_masks = [],[]
-    max_len = 0
+    outputs = []
     
     for sentencesid, sentences in enumerate(batched_sentences):
         if print_on == True:
             print(f"Encoding batch {sentencesid+1} of {total_len}")
+            
         output, attention_mask = encode(sentences)
-        outputs.append(output.cpu())
-        attention_masks.append(attention_mask.cpu())
-        
-        if device == torch.device("cuda"):
-            torch.cuda.empty_cache()
-        output_len = output.size(dim=1)
+        pooled = mean_pool(output, attention_mask)
+        outputs.append(pooled.cpu())
         
         del output, attention_mask
-        if max_len < output_len:
-            max_len = output_len
-        
-    
-    padded_outputs, padded_masks = [],[]
-    for output, mask in zip(outputs, attention_masks):
-        batch_size, seqlen, dummy = output.shape
-        pad_len = max_len - seqlen
-        
-        if pad_len > 0:
-            output_pad = torch.zeros(batch_size, pad_len, 1024, device=device)
-            mask_pad = torch.zeros(batch_size,pad_len, device=device)
-            
-            output = torch.cat([output, output_pad], dim=1)
-            mask = torch.cat([mask, mask_pad], dim=1)
-     
-        padded_outputs.append(output)
-        padded_masks.append(mask)
 
-    return torch.cat(padded_outputs, dim=0), torch.cat(padded_masks, dim=0)
+    return torch.cat(outputs, dim=0)
 
 if runtype == "-c": #create directional vector
     with open(arg2) as infile:
@@ -181,6 +158,8 @@ if runtype == "-t": #train decoder model
     lossfn = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
     def train(loader, epochs=64, lr=0.0001, printepoch=True, optimizer=optimizer, lossfn=lossfn):
         learning_rate=lr
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
         for epoch in range(epochs):
             if printepoch==True:
                 print(f"Training Epoch #{epoch + 1}")
@@ -200,17 +179,13 @@ if runtype == "-t": #train decoder model
    
    
     ptrange = list(range(128, len(pretrainings), 128)) #pretraining loop
-    for i in range(2):
+    for i in range(1):
         print(f"Training Epoch #{i + 1}")
         random.shuffle(ptrange)
         for batchno, val in enumerate(ptrange):
             with torch.no_grad():
-                ptoutputs, ptmasks = encode_all_sentences(pretrainings[(val-128):val]) #pretraining loop
+                samples = encode_all_sentences(pretrainings[(val-128):val]) #pretraining loop
             targets = tokenizer(pretrainings[(val-128):val], padding=True, return_tensors="pt")["input_ids"].to(device)
-            samples = []
-            samples = mean_pool(ptoutputs, ptmasks)
-            del ptoutputs, ptmasks
-            torch.cuda.empty_cache()
             data = list(zip(samples, targets))
             dataset = DataSet(data)
     
@@ -221,13 +196,8 @@ if runtype == "-t": #train decoder model
                 print(f"Processing Batch #{batchno} of {len(ptrange)}, Epoch #{i + 1}")
                 train(loader, epochs=1, printepoch=True)
     
-    jacoboutputs, jacobmasks = encode_all_sentences(jacobs) #fine tuning loop
-    unsqueezedmasks = torch.unsqueeze(jacobmasks, dim=-1)
-    targets = tokenizer(jacobs, padding=True, return_tensors="pt")["input_ids"]
-    samples = []
-    for sentence, mask in zip(torch.split(jacoboutputs, 1, dim=0), torch.split(jacobmasks, 1, dim=0)):
-        samples.append(mean_pool(sentence, mask))
-    samples = torch.cat(samples, dim=0)
+    samples = encode_all_sentences(jacobs) #fine tuning loop
+    targets = tokenizer(jacobs, padding=True, return_tensors="pt")["input_ids"].to(device)
     data = list(zip(samples, targets))
     dataset = DataSet(data)
     
@@ -238,20 +208,39 @@ if runtype == "-t": #train decoder model
     
     
 if runtype == "-s":
+    def clear_screen():
+    # Check the operating system name
+        if os.name == 'nt':
+            # Command for Windows
+            _ = os.system('cls')
+        else:
+            # Command for Linux/macOS/POSIX
+            _ = os.system('clear')
+    
+    print("Loading model!")
     decoder = decode().to(device)
     decoder = torch.load("decode.pt", map_location=device, weights_only=False)
     decoder.eval()
-    string = arg2
-    output, mask = encode(string)
-    unsqueezedmask = mask.unsqueeze(dim=-1)
-    embedding = mean_pool(output, mask).to(device)
-    seq = torch.tensor([[tokenizer.bos_token_id]]).to(device)
-    for i in range(256):
-        generated = decoder(embedding, seq)[:, -1, :].argmax(dim = -1, keepdim=True)
-        if generated.item() == tokenizer.eos_token_id:
+    
+    clear_screen()
+    
+    e = True
+    while e == True:
+        string = input("Please enter an input for the model to produce, or type \"E\" to exit: ")
+        print("\n")
+        if string == "E":
+            e = False
             break
-            
-        seq = torch.cat([seq, generated], dim=-1)
-    print(tokenizer.decode(seq[0], skip_special_tokens=True))
+        output, mask = encode(string)
+        unsqueezedmask = mask.unsqueeze(dim=-1)
+        embedding = mean_pool(output, mask).to(device)
+        seq = torch.tensor([[tokenizer.bos_token_id]]).to(device)
+        for i in range(256):
+            generated = decoder(embedding, seq)[:, -1, :].argmax(dim = -1, keepdim=True)
+            if generated.item() == tokenizer.eos_token_id:
+                break
+        
+            seq = torch.cat([seq, generated], dim=-1)
+        print(f"\"Jacob\'s\" Output: {tokenizer.decode(seq[0], skip_special_tokens=True)}\n\n")
     
     
