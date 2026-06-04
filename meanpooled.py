@@ -218,8 +218,8 @@ if runtype == "-s":
             _ = os.system('clear')
     
     print("Loading model!")
-    decoder = decode().to(device)
     decoder = torch.load("decode.pt", map_location=device, weights_only=False)
+    decoder = decoder.float()
     decoder.eval()
     
     clear_screen()
@@ -233,7 +233,7 @@ if runtype == "-s":
             break
         output, mask = encode(string)
         unsqueezedmask = mask.unsqueeze(dim=-1)
-        embedding = mean_pool(output, mask).to(device)
+        embedding = mean_pool(output, mask).to(device).float()
         seq = torch.tensor([[tokenizer.bos_token_id]]).to(device)
         for i in range(256):
             generated = decoder(embedding, seq)[:, -1, :].argmax(dim = -1, keepdim=True)
